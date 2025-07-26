@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "ImmichFamilyMerger": {
+      "commandName": "Project"
+    },
+    "Container (Dockerfile)": {
+      "commandName": "Docker"
+    }
+  }
+}
