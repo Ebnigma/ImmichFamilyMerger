@@ -93,7 +93,7 @@ namespace ImmichFamilyMerger
             _httpClient.DefaultRequestHeaders.Clear();
             _httpClient.DefaultRequestHeaders.Add("x-api-key", _config.AppApiKey);
 
-            using var content = new MultipartFormDataContent
+            var content = new MultipartFormDataContent
             {
                 { new ByteArrayContent(assetBytes), "assetData", asset.OriginalFileName },
                 { new StringContent(_appDeviceId), "deviceId" },
@@ -104,6 +104,7 @@ namespace ImmichFamilyMerger
             };
 
             var response = await _httpClient.PostAsync($"{_config.BaseUrl}/api/assets", content);
+            Console.WriteLine($"Assets uploaded. Status: {response.StatusCode}");
             if (!response.IsSuccessStatusCode)
             {
                 var errorContent = await response.Content.ReadAsStringAsync();

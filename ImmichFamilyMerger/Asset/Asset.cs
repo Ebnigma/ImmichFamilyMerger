@@ -27,7 +27,7 @@ namespace ImmichFamilyMerger
         public bool IsTrashed { get; set; }
         public string Visibility { get; set; }
         public string Duration { get; set; }
-        public ExifInfo ExifInfo { get; set; }
+        public ExifInfo? ExifInfo { get; set; }
         public string? LivePhotoVideoId { get; set; }
         public List<object> People { get; set; }
         public string Checksum { get; set; }
