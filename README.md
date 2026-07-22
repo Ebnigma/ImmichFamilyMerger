@@ -1,6 +1,7 @@
 # Immich Family Merger
 
 [![Test and publish container](https://github.com/Ebnigma/ImmichFamilyMerger/actions/workflows/container.yml/badge.svg)](https://github.com/Ebnigma/ImmichFamilyMerger/actions/workflows/container.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 Bring family photos and videos together under one Immich account without giving up the convenience of individual user accounts.
 
@@ -175,3 +176,7 @@ docker build -f ImmichFamilyMerger/Dockerfile -t immich-family-merger .
 The suite covers paginated album discovery, destination corruption, duplicate handling, unsupported live photos, source changes, trash ordering, and restart recovery.
 
 This project is independent community software and is not affiliated with the Immich project. API behavior follows Immich's documented [search](https://api.immich.app/endpoints/search/searchAssets), [upload](https://api.immich.app/endpoints/assets/uploadAsset), [download](https://api.immich.app/endpoints/assets/downloadAsset), [album](https://api.immich.app/endpoints/albums/addAssetsToAlbum), and [delete](https://api.immich.app/endpoints/assets/deleteAssets) endpoints.
+
+## License
+
+Immich Family Merger is free software licensed under the [GNU General Public License version 3](LICENSE), without an option to use later GPL versions (GPL-3.0-only).

@@ -29,6 +29,5 @@
 **/values.dev.yaml
 **/TestResults
 ImmichFamilyMerger.Tests
-LICENSE
 README.md
 !**/.gitignore

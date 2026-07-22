@@ -81,6 +81,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=Immich Family Merger
             org.opencontainers.image.description=Safely migrate shared Immich assets into a family account
+            org.opencontainers.image.licenses=GPL-3.0-only
 
       - name: Build and publish multi-platform image
         id: build
