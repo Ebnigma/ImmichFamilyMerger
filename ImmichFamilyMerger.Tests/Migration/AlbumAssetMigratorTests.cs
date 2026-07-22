@@ -103,7 +103,7 @@ public sealed class AlbumAssetMigratorTests
         using var temporary = new TemporaryDirectory();
         var server = new FakeImmichServer
         {
-            UploadStatus = "duplicate",
+            DestinationCreated = true,
             MismatchDestinationMetadata = true,
         };
 
@@ -121,7 +121,7 @@ public sealed class AlbumAssetMigratorTests
         using var temporary = new TemporaryDirectory();
         var server = new FakeImmichServer
         {
-            UploadStatus = "duplicate",
+            DestinationCreated = true,
             NormalizeDestinationTimeZone = true,
         };
 
@@ -130,6 +130,9 @@ public sealed class AlbumAssetMigratorTests
         Assert.False(server.SourceInAlbum);
         Assert.False(server.DestinationInAlbum);
         Assert.True(server.SourceTrashed);
+        Assert.DoesNotContain(
+            server.Requests,
+            request => request.Method == "POST" && request.Path == "/api/assets");
         Assert.Contains(server.Requests, request => request.Path.EndsWith("/assets/destination/original"));
         Assert.Empty((await MigrationStateStore.OpenAsync(
             Path.Combine(temporary.Path, "state.json"),
@@ -230,6 +233,44 @@ public sealed class AlbumAssetMigratorTests
         Assert.Empty((await MigrationStateStore.OpenAsync(
             Path.Combine(temporary.Path, "state.json"),
             default)).IncompleteRecords);
+    }
+
+    [Fact]
+    public async Task AmbiguousUploadIsReconciledWithoutASecondMediaPost()
+    {
+        using var temporary = new TemporaryDirectory();
+        var server = new FakeImmichServer { FailUploadAfterCreation = true };
+
+        await RunMigrationAsync(server, temporary.Path);
+
+        Assert.Single(
+            server.Requests,
+            request => request.Method == "POST" && request.Path == "/api/assets");
+        Assert.True(server.SourceTrashed);
+        Assert.Empty((await MigrationStateStore.OpenAsync(
+            Path.Combine(temporary.Path, "state.json"),
+            default)).IncompleteRecords);
+    }
+
+    [Fact]
+    public async Task UnconfirmedUploadIsNeverPostedAgainAutomatically()
+    {
+        using var temporary = new TemporaryDirectory();
+        var server = new FakeImmichServer { FailUploadWithoutCreation = true };
+
+        await RunMigrationAsync(server, temporary.Path);
+        await RunMigrationAsync(server, temporary.Path);
+
+        Assert.Single(
+            server.Requests,
+            request => request.Method == "POST" && request.Path == "/api/assets");
+        Assert.False(server.SourceTrashed);
+        Assert.True(server.SourceInAlbum);
+        var record = Assert.Single((await MigrationStateStore.OpenAsync(
+            Path.Combine(temporary.Path, "state.json"),
+            default)).IncompleteRecords);
+        Assert.Equal(MigrationPhase.UploadAttempted, record.Phase);
+        Assert.Contains("will not be repeated automatically", record.LastError);
     }
 
     private static async Task RunMigrationAsync(

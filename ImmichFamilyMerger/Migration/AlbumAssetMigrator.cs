@@ -155,30 +155,82 @@ internal sealed class AlbumAssetMigrator
         {
             var localDigest = await ComputeFileDigestAsync(mediaPath, cancellationToken);
             RequireMatchingJournalDigest(record, localDigest, "local spool file");
-            Console.WriteLine($"Uploading {record.SourceAssetId} to the family account.");
-            var upload = await _api.UploadAsync(
-                record.Source,
-                mediaPath,
-                _config.AppDeviceId,
-                record.DeviceAssetId,
-                _config.AppApiKey,
-                cancellationToken);
-            var destination = await _api.GetAssetAsync(upload.Id, _config.AppApiKey, cancellationToken);
-            RequireDestinationIdentity(record, destination, destinationUserId);
-            if (upload.Status.Equals("duplicate", StringComparison.OrdinalIgnoreCase))
+
+            Asset? destination = null;
+            var uploadAuthorizedThisRun = false;
+            if (record.Phase < MigrationPhase.UploadAttempted)
             {
-                try
+                destination = await FindExistingDestinationAsync(
+                    record,
+                    destinationUserId,
+                    uploadWasAttempted: false,
+                    cancellationToken);
+                if (destination is null)
                 {
-                    RequireMatchingUserMetadata(record.Source, destination);
-                    await RequireMatchingCustomMetadataAsync(record, destination.Id, cancellationToken);
+                    // Persist this boundary before sending a non-idempotent request. If the process disappears while
+                    // uploading, a restart reconciles by checksum instead of sending the bytes a second time.
+                    record.Phase = MigrationPhase.UploadAttempted;
+                    await _state.SaveAsync(record, cancellationToken);
+                    uploadAuthorizedThisRun = true;
                 }
-                catch (InvalidDataException exception)
+            }
+
+            if (destination is null && record.Phase == MigrationPhase.UploadAttempted)
+            {
+                if (!uploadAuthorizedThisRun)
                 {
-                    throw new InvalidOperationException(
-                        $"Immich matched the upload to pre-existing asset {destination.Id}, but its metadata differs. " +
-                        "It will not be adopted or modified automatically.",
-                        exception);
+                    destination = await FindExistingDestinationAsync(
+                        record,
+                        destinationUserId,
+                        uploadWasAttempted: true,
+                        cancellationToken);
+                    if (destination is null)
+                    {
+                        throw new InvalidOperationException(
+                            "The journal records an upload attempt, but Immich does not report a matching destination. " +
+                            "The upload will not be repeated automatically because its outcome is uncertain.");
+                    }
                 }
+                else
+                {
+                    Console.WriteLine($"Uploading {record.SourceAssetId} to the family account (single attempt).");
+                    try
+                    {
+                        var upload = await _api.UploadAsync(
+                            record.Source,
+                            mediaPath,
+                            _config.AppDeviceId,
+                            record.DeviceAssetId,
+                            _config.AppApiKey,
+                            cancellationToken);
+                        destination = await _api.GetAssetAsync(upload.Id, _config.AppApiKey, cancellationToken);
+                        RequireDestinationIdentity(record, destination, destinationUserId);
+                        if (upload.Status.Equals("duplicate", StringComparison.OrdinalIgnoreCase))
+                        {
+                            RequireMatchingUploadIdentity(record, destination);
+                        }
+                    }
+                    catch (Exception exception) when (IsAmbiguousUploadFailure(exception, cancellationToken))
+                    {
+                        destination = await FindExistingDestinationAsync(
+                            record,
+                            destinationUserId,
+                            uploadWasAttempted: true,
+                            cancellationToken);
+                        if (destination is null)
+                        {
+                            throw new InvalidOperationException(
+                                "Immich did not confirm the upload and no matching destination is visible. " +
+                                "The upload will not be repeated automatically because its outcome is uncertain.",
+                                exception);
+                        }
+                    }
+                }
+            }
+
+            if (destination is null)
+            {
+                throw new InvalidDataException("The upload phase completed without a destination asset.");
             }
 
             record.DestinationAssetId = destination.Id;
@@ -252,6 +304,101 @@ internal sealed class AlbumAssetMigrator
         Console.WriteLine(
             $"MOVED {record.SourceAssetId} -> {destinationId}; queue entry removed and original is recoverable in Immich trash.");
     }
+
+    private async Task<Asset?> FindExistingDestinationAsync(
+        MigrationRecord record,
+        string destinationUserId,
+        bool uploadWasAttempted,
+        CancellationToken cancellationToken)
+    {
+        var check = await _api.CheckBulkUploadAsync(
+            record.DeviceAssetId,
+            record.VerifiedChecksum ?? record.Source.Checksum,
+            _config.AppApiKey,
+            cancellationToken);
+        if (string.IsNullOrWhiteSpace(check.AssetId))
+        {
+            if (check.Action.Equals("accept", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            var reason = string.IsNullOrWhiteSpace(check.Reason) ? "no reason supplied" : check.Reason;
+            throw new InvalidOperationException(
+                $"Immich rejected the upload check with action '{check.Action}' ({reason}), but returned no existing asset ID.");
+        }
+
+        if (check.IsTrashed == true)
+        {
+            throw new InvalidOperationException(
+                $"Immich reports matching destination asset {check.AssetId} in trash; it will not be restored or adopted automatically.");
+        }
+
+        var destination = await _api.GetAssetAsync(check.AssetId, _config.AppApiKey, cancellationToken);
+        RequireDestinationIdentity(record, destination, destinationUserId);
+        if (destination.IsTrashed)
+        {
+            throw new InvalidOperationException($"Matching destination asset {destination.Id} is in trash.");
+        }
+
+        try
+        {
+            var hasDeterministicLegacyId = !string.IsNullOrWhiteSpace(destination.DeviceAssetId) &&
+                                           destination.DeviceAssetId.Equals(
+                                               record.DeviceAssetId,
+                                               StringComparison.Ordinal);
+            if (uploadWasAttempted || hasDeterministicLegacyId)
+            {
+                RequireMatchingUploadIdentity(record, destination);
+            }
+            else
+            {
+                RequireMatchingUserMetadata(record.Source, destination);
+                await RequireMatchingCustomMetadataAsync(record, destination.Id, cancellationToken);
+            }
+        }
+        catch (InvalidDataException exception)
+        {
+            throw new InvalidOperationException(
+                $"Immich matched the checksum to asset {destination.Id}, but its identity or metadata differs. " +
+                "It will not be adopted or modified automatically.",
+                exception);
+        }
+
+        Console.WriteLine($"Reconciled existing family asset {destination.Id} for source {record.SourceAssetId}.");
+        return destination;
+    }
+
+    private static void RequireMatchingUploadIdentity(MigrationRecord record, Asset destination)
+    {
+        if (!string.IsNullOrWhiteSpace(destination.DeviceAssetId) &&
+            !destination.DeviceAssetId.Equals(record.DeviceAssetId, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("Destination device asset ID does not match the migration journal.");
+        }
+
+        if (!string.Equals(record.Source.OriginalFileName, destination.OriginalFileName, StringComparison.Ordinal) ||
+            !EqualRequiredDate(record.Source.FileCreatedAt, destination.FileCreatedAt) ||
+            !EqualRequiredDate(record.Source.FileModifiedAt, destination.FileModifiedAt) ||
+            record.Source.IsFavorite != destination.IsFavorite ||
+            !record.Source.Visibility.Equals(destination.Visibility, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException("Destination upload fields do not match the migration journal.");
+        }
+    }
+
+    private static bool IsAmbiguousUploadFailure(Exception exception, CancellationToken cancellationToken) =>
+        !cancellationToken.IsCancellationRequested &&
+        (exception is HttpRequestException or IOException ||
+         exception is ImmichApiException apiException &&
+         (apiException.StatusCode is System.Net.HttpStatusCode.RequestTimeout or
+             System.Net.HttpStatusCode.TooManyRequests || (int)apiException.StatusCode >= 500));
+
+    private static bool EqualRequiredDate(string expected, string actual) =>
+        DateTimeOffset.TryParse(expected, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var expectedDate) &&
+        DateTimeOffset.TryParse(actual, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var actualDate)
+            ? expectedDate.EqualsExact(actualDate)
+            : string.Equals(expected, actual, StringComparison.Ordinal);
 
     private async Task VerifyDestinationAsync(
         MigrationRecord record,

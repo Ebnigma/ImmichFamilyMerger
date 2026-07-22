@@ -28,9 +28,11 @@ internal sealed class FakeImmichServer : HttpMessageHandler
     public bool ChangeSourceAfterUpload { get; init; }
     public bool MismatchDestinationMetadata { get; init; }
     public bool NormalizeDestinationTimeZone { get; init; }
+    public bool FailUploadAfterCreation { get; init; }
+    public bool FailUploadWithoutCreation { get; init; }
     public int TrashFailuresRemaining { get; set; }
     public string UploadStatus { get; init; } = "created";
-    private bool DestinationCreated { get; set; }
+    public bool DestinationCreated { get; set; }
 
     protected override async Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request,
@@ -60,6 +62,28 @@ internal sealed class FakeImmichServer : HttpMessageHandler
         if (request.Method == HttpMethod.Post && path == "/api/search/metadata")
         {
             return SearchAssets(body);
+        }
+
+        if (request.Method == HttpMethod.Post && path == "/api/assets/bulk-upload-check")
+        {
+            using var check = JsonDocument.Parse(body);
+            var item = check.RootElement.GetProperty("assets").EnumerateArray().Single();
+            Assert.Equal(Checksum, item.GetProperty("checksum").GetString());
+            var requestId = item.GetProperty("id").GetString();
+            return Json(new
+            {
+                results = new[]
+                {
+                    new
+                    {
+                        id = requestId,
+                        action = DestinationCreated ? "reject" : "accept",
+                        assetId = DestinationCreated ? DestinationAssetId : null,
+                        isTrashed = false,
+                        reason = DestinationCreated ? "duplicate" : null,
+                    },
+                },
+            });
         }
 
         if (request.Method == HttpMethod.Get && path == $"/api/assets/{SourceAssetId}")
@@ -92,7 +116,17 @@ internal sealed class FakeImmichServer : HttpMessageHandler
 
         if (request.Method == HttpMethod.Post && path == "/api/assets")
         {
+            if (FailUploadWithoutCreation)
+            {
+                return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+            }
+
             DestinationCreated = true;
+            if (FailUploadAfterCreation)
+            {
+                return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+            }
+
             return Json(new { id = DestinationAssetId, status = UploadStatus }, HttpStatusCode.Created);
         }
 

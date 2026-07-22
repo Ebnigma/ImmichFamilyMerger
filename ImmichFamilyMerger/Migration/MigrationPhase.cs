@@ -4,6 +4,7 @@ internal enum MigrationPhase
 {
     Discovered,
     Downloaded,
+    UploadAttempted,
     Uploaded,
     // Retained so journals written by older releases remain readable.
     RelatedDataCopied,

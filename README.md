@@ -109,18 +109,19 @@ For each supported asset, the service:
 
 1. records the source asset and custom metadata in the durable journal;
 2. streams the original to the persistent `/data` volume and verifies its SHA-1 checksum and reported size;
-3. uploads it with a deterministic device identity so restarts remain idempotent;
-4. applies supported user-visible and custom metadata;
-5. downloads the destination original and verifies the bytes, ownership, and metadata;
-6. re-reads the source and stops if it changed during the migration;
-7. moves the source to Immich's trash using `force: false` when source trashing is enabled;
-8. verifies that the source and destination are absent from the migration queue, removing any residual album memberships.
+3. asks Immich's checksum endpoint whether those bytes already exist in the family account;
+4. journals the upload boundary, then sends the media upload exactly once;
+5. applies supported user-visible and custom metadata;
+6. downloads the destination original and verifies the bytes, ownership, and metadata;
+7. re-reads the source and stops if it changed during the migration;
+8. moves the source to Immich's trash using `force: false` when source trashing is enabled;
+9. verifies that the source and destination are absent from the migration queue, removing any residual album memberships.
 
 Journal updates are flushed to disk and atomically replaced after every completed phase. A restart resumes incomplete work. At the source-trash boundary, destination verification is always repeated instead of trusting an older journal result.
 
 Family-owned assets are never migration inputs. If an older release left destination copies in the queue album, the next scan removes those album memberships without deleting or trashing the assets.
 
-If Immich reports a duplicate during upload, the service adopts it only when ownership, bytes, and metadata match. An ambiguous or mismatched duplicate is left untouched for manual review.
+The media `POST` is never automatically retried. If Immich fails while answering an upload, the service reconciles the result through the read-only bulk-upload check. A journaled attempt that cannot be confirmed is paused instead of posting the media again. Existing duplicates are adopted only when ownership, bytes, and either the migration identity or metadata match; ambiguous or mismatched duplicates are left untouched for manual review.
 
 No client using several HTTP requests can provide a database transaction across an entire migration. Avoid editing source assets while they are being processed; the final source comparison prevents trashing when a change is detected.
 
@@ -177,7 +178,7 @@ docker build -f ImmichFamilyMerger/Dockerfile -t immich-family-merger .
 
 The suite covers paginated album discovery, destination corruption, duplicate handling, unsupported live photos, source changes, trash ordering, and restart recovery.
 
-This project is independent community software and is not affiliated with the Immich project. API behavior follows Immich's documented [search](https://api.immich.app/endpoints/search/searchAssets), [upload](https://api.immich.app/endpoints/assets/uploadAsset), [download](https://api.immich.app/endpoints/assets/downloadAsset), [album removal](https://api.immich.app/endpoints/albums/removeAssetFromAlbum), and [trash/delete](https://api.immich.app/endpoints/assets/deleteAssets) endpoints.
+This project is independent community software and is not affiliated with the Immich project. API behavior follows Immich's documented [search](https://api.immich.app/endpoints/search/searchAssets), [bulk-upload check](https://api.immich.app/endpoints/assets/checkBulkUpload), [upload](https://api.immich.app/endpoints/assets/uploadAsset), [download](https://api.immich.app/endpoints/assets/downloadAsset), [album removal](https://api.immich.app/endpoints/albums/removeAssetFromAlbum), and [trash/delete](https://api.immich.app/endpoints/assets/deleteAssets) endpoints.
 
 ## License
 

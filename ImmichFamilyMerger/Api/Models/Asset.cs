@@ -6,6 +6,7 @@ internal sealed class Asset
 {
     public required string Id { get; init; }
     public required string OwnerId { get; init; }
+    public string? DeviceAssetId { get; init; }
     public required string Type { get; init; }
     public required string OriginalFileName { get; init; }
     public string? OriginalMimeType { get; init; }

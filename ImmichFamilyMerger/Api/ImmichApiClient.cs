@@ -174,44 +174,76 @@ internal sealed class ImmichApiClient
         string apiKey,
         CancellationToken cancellationToken)
     {
-        return await SendWithRetryAsync(requestCancellationToken =>
+        using var request = CreateRequest(HttpMethod.Post, "assets", apiKey);
+        var multipart = new MultipartFormDataContent();
+        var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var media = new StreamContent(stream);
+        if (!string.IsNullOrWhiteSpace(source.OriginalMimeType))
         {
-            var request = CreateRequest(HttpMethod.Post, "assets", apiKey);
-            var multipart = new MultipartFormDataContent();
-            var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
-            var media = new StreamContent(stream);
-            if (!string.IsNullOrWhiteSpace(source.OriginalMimeType))
-            {
-                media.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(source.OriginalMimeType);
-            }
+            media.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(source.OriginalMimeType);
+        }
 
-            multipart.Add(media, "assetData", SafeFileName(source.OriginalFileName));
-            multipart.Add(new StringContent(deviceId), "deviceId");
-            multipart.Add(new StringContent(deviceAssetId), "deviceAssetId");
-            multipart.Add(new StringContent(source.FileCreatedAt), "fileCreatedAt");
-            multipart.Add(new StringContent(source.FileModifiedAt), "fileModifiedAt");
-            multipart.Add(new StringContent(SafeFileName(source.OriginalFileName)), "filename");
-            multipart.Add(new StringContent(source.IsFavorite ? "true" : "false"), "isFavorite");
-            multipart.Add(new StringContent(source.Visibility), "visibility");
-            if (source.Duration.ValueKind is JsonValueKind.Number or JsonValueKind.String)
+        multipart.Add(media, "assetData", SafeFileName(source.OriginalFileName));
+        multipart.Add(new StringContent(deviceId), "deviceId");
+        multipart.Add(new StringContent(deviceAssetId), "deviceAssetId");
+        multipart.Add(new StringContent(source.FileCreatedAt), "fileCreatedAt");
+        multipart.Add(new StringContent(source.FileModifiedAt), "fileModifiedAt");
+        multipart.Add(new StringContent(SafeFileName(source.OriginalFileName)), "filename");
+        multipart.Add(new StringContent(source.IsFavorite ? "true" : "false"), "isFavorite");
+        multipart.Add(new StringContent(source.Visibility), "visibility");
+        if (source.Duration.ValueKind is JsonValueKind.Number or JsonValueKind.String)
+        {
+            var duration = source.Duration.ValueKind == JsonValueKind.String
+                ? source.Duration.GetString()
+                : source.Duration.GetRawText();
+            if (!string.IsNullOrWhiteSpace(duration))
             {
-                var duration = source.Duration.ValueKind == JsonValueKind.String
-                    ? source.Duration.GetString()
-                    : source.Duration.GetRawText();
-                if (!string.IsNullOrWhiteSpace(duration))
+                multipart.Add(new StringContent(duration), "duration");
+            }
+        }
+
+        request.Content = multipart;
+        using var response = await _httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+        await EnsureSuccessAsync(response, $"upload asset {source.Id}", cancellationToken);
+        return await ReadJsonAsync<UploadResponse>(response, cancellationToken);
+    }
+
+    public async Task<BulkUploadCheckResult> CheckBulkUploadAsync(
+        string requestId,
+        string checksum,
+        string apiKey,
+        CancellationToken cancellationToken)
+    {
+        var body = new BulkUploadCheckRequest
+        {
+            Assets =
+            [
+                new BulkUploadCheckItem
                 {
-                    multipart.Add(new StringContent(duration), "duration");
-                }
-            }
-
-            request.Content = multipart;
-            return Task.FromResult(request);
-        }, async response =>
+                    Id = requestId,
+                    Checksum = checksum,
+                },
+            ],
+        };
+        using var response = await SendJsonAsync(
+            HttpMethod.Post,
+            "assets/bulk-upload-check",
+            apiKey,
+            body,
+            cancellationToken);
+        await EnsureSuccessAsync(response, $"check upload checksum for {requestId}", cancellationToken);
+        var result = await ReadJsonAsync<BulkUploadCheckResponse>(response, cancellationToken);
+        if (result.Results.Count != 1 ||
+            !result.Results[0].Id.Equals(requestId, StringComparison.Ordinal))
         {
-            await EnsureSuccessAsync(response, $"upload asset {source.Id}", cancellationToken);
-            return await ReadJsonAsync<UploadResponse>(response, cancellationToken);
-        }, cancellationToken);
+            throw new InvalidDataException("Immich returned an invalid bulk-upload-check response.");
+        }
+
+        return result.Results[0];
     }
 
     public async Task UpdateAssetMetadataAsync(
