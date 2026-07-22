@@ -38,7 +38,13 @@ internal sealed class AlbumAssetMigrator
         foreach (var albumAsset in albumAssets)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (albumAsset.OwnerId.Equals(destinationUser.Id, StringComparison.OrdinalIgnoreCase) || _state.Contains(albumAsset.Id))
+            if (albumAsset.OwnerId.Equals(destinationUser.Id, StringComparison.OrdinalIgnoreCase))
+            {
+                await RemoveFamilyOwnedQueueEntrySafelyAsync(albumAsset.Id, cancellationToken);
+                continue;
+            }
+
+            if (_state.Contains(albumAsset.Id))
             {
                 continue;
             }
@@ -116,7 +122,8 @@ internal sealed class AlbumAssetMigrator
             record.LastError = exception.Message;
             await _state.SaveAsync(record, cancellationToken);
             Console.Error.WriteLine(
-                $"PAUSED {record.SourceAssetId} at {record.Phase}: {exception.Message}. The source was not deleted by this attempt.");
+                $"PAUSED {record.SourceAssetId} at {record.Phase}: {exception.Message}. " +
+                "No permanent delete is performed; the journal will resume this migration.");
         }
     }
 
@@ -199,14 +206,6 @@ internal sealed class AlbumAssetMigrator
             await _state.SaveAsync(record, cancellationToken);
         }
 
-        if (record.Phase < MigrationPhase.AlbumAdded)
-        {
-            await _api.AddToAlbumAsync(_config.AlbumId, destinationId, _config.AppApiKey, cancellationToken);
-            await RequireAlbumMembershipAsync(destinationId, cancellationToken);
-            record.Phase = MigrationPhase.AlbumAdded;
-            await _state.SaveAsync(record, cancellationToken);
-        }
-
         if (record.Phase < MigrationPhase.Verified)
         {
             await VerifyDestinationAsync(record, destinationUserId, cancellationToken);
@@ -214,10 +213,11 @@ internal sealed class AlbumAssetMigrator
             await _state.SaveAsync(record, cancellationToken);
         }
 
-        if (!_config.TrashOriginals)
+        if (!_config.TrashOriginals && record.Phase < MigrationPhase.SourceTrashed)
         {
             DeleteSpoolFiles(record.SourceAssetId);
-            Console.WriteLine($"VERIFIED {record.SourceAssetId} -> {destinationId}; original retained by configuration.");
+            Console.WriteLine(
+                $"VERIFIED {record.SourceAssetId} -> {destinationId}; original retained in the migration queue by configuration.");
             return;
         }
 
@@ -236,10 +236,21 @@ internal sealed class AlbumAssetMigrator
             await _state.SaveAsync(record, cancellationToken);
         }
 
+        if (record.Phase < MigrationPhase.QueueCleaned)
+        {
+            // Source removal is repeated for journals created by older releases, and destination removal cleans up
+            // copies that those releases added to the watched album.
+            await EnsureRemovedFromQueueAsync(record.SourceAssetId, cancellationToken);
+            await EnsureRemovedFromQueueAsync(destinationId, cancellationToken);
+            record.Phase = MigrationPhase.QueueCleaned;
+            await _state.SaveAsync(record, cancellationToken);
+        }
+
         DeleteSpoolFiles(record.SourceAssetId);
         record.Phase = MigrationPhase.Complete;
         await _state.SaveAsync(record, cancellationToken);
-        Console.WriteLine($"MOVED {record.SourceAssetId} -> {destinationId}; original is recoverable in Immich trash.");
+        Console.WriteLine(
+            $"MOVED {record.SourceAssetId} -> {destinationId}; queue entry removed and original is recoverable in Immich trash.");
     }
 
     private async Task VerifyDestinationAsync(
@@ -263,7 +274,6 @@ internal sealed class AlbumAssetMigrator
         File.Delete(verificationPath);
 
         await RequireMatchingCustomMetadataAsync(record, destinationId, cancellationToken);
-        await RequireAlbumMembershipAsync(destinationId, cancellationToken);
     }
 
     private async Task RequireMatchingCustomMetadataAsync(
@@ -284,15 +294,47 @@ internal sealed class AlbumAssetMigrator
         }
     }
 
-    private async Task RequireAlbumMembershipAsync(string destinationId, CancellationToken cancellationToken)
+    private async Task EnsureRemovedFromQueueAsync(string assetId, CancellationToken cancellationToken)
     {
-        if (!await _api.IsAssetInAlbumAsync(
-                _config.AlbumId,
-                destinationId,
-                _config.AppApiKey,
-                cancellationToken))
+        if (!await _api.IsAssetInAlbumAsync(_config.AlbumId, assetId, _config.AppApiKey, cancellationToken))
         {
-            throw new InvalidOperationException($"Destination asset {destinationId} is not present in the family album.");
+            return;
+        }
+
+        try
+        {
+            await _api.RemoveFromAlbumAsync(
+                _config.AlbumId,
+                assetId,
+                _config.AppApiKey,
+                cancellationToken);
+        }
+        catch (ImmichApiException exception) when (exception.StatusCode == System.Net.HttpStatusCode.BadRequest)
+        {
+            if (await _api.IsAssetInAlbumAsync(_config.AlbumId, assetId, _config.AppApiKey, cancellationToken))
+            {
+                throw;
+            }
+
+            // The desired state was reached between the membership check and removal request.
+        }
+
+        if (await _api.IsAssetInAlbumAsync(_config.AlbumId, assetId, _config.AppApiKey, cancellationToken))
+        {
+            throw new InvalidOperationException($"Asset {assetId} is still present in the migration queue album.");
+        }
+    }
+
+    private async Task RemoveFamilyOwnedQueueEntrySafelyAsync(string assetId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await EnsureRemovedFromQueueAsync(assetId, cancellationToken);
+            Console.WriteLine($"CLEANED {assetId}: family-owned asset removed from the migration queue.");
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            Console.Error.WriteLine($"FAILED to clean family-owned queue entry {assetId}: {exception.Message}");
         }
     }
 

@@ -20,6 +20,7 @@ internal sealed class FakeImmichServer : HttpMessageHandler
     private static readonly string Checksum = Convert.ToBase64String(SHA1.HashData(Original));
 
     public List<RequestLog> Requests { get; } = [];
+    public bool SourceInAlbum { get; set; } = true;
     public bool DestinationInAlbum { get; set; }
     public bool SourceTrashed { get; set; }
     public bool CorruptDestinationDownload { get; init; }
@@ -27,7 +28,9 @@ internal sealed class FakeImmichServer : HttpMessageHandler
     public bool ChangeSourceAfterUpload { get; init; }
     public bool MismatchDestinationMetadata { get; init; }
     public bool NormalizeDestinationTimeZone { get; init; }
+    public int TrashFailuresRemaining { get; set; }
     public string UploadStatus { get; init; } = "created";
+    private bool DestinationCreated { get; set; }
 
     protected override async Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request,
@@ -49,7 +52,7 @@ internal sealed class FakeImmichServer : HttpMessageHandler
             {
                 id = AlbumId,
                 albumName = "Family inbox",
-                assetCount = DestinationInAlbum ? 2 : 1,
+                assetCount = Convert.ToInt32(SourceInAlbum) + Convert.ToInt32(DestinationInAlbum),
                 albumUsers = Array.Empty<object>(),
             });
         }
@@ -89,19 +92,43 @@ internal sealed class FakeImmichServer : HttpMessageHandler
 
         if (request.Method == HttpMethod.Post && path == "/api/assets")
         {
+            DestinationCreated = true;
             return Json(new { id = DestinationAssetId, status = UploadStatus }, HttpStatusCode.Created);
         }
 
-        if (request.Method == HttpMethod.Put && path == $"/api/albums/{AlbumId}/assets")
+        if (request.Method == HttpMethod.Delete && path == $"/api/albums/{AlbumId}/assets")
         {
-            DestinationInAlbum = true;
-            return Json(new[] { new { id = DestinationAssetId, success = true } });
+            using var removal = JsonDocument.Parse(body);
+            var ids = removal.RootElement.GetProperty("ids").EnumerateArray()
+                .Select(id => id.GetString()!)
+                .ToArray();
+            foreach (var id in ids)
+            {
+                if (id == SourceAssetId)
+                {
+                    SourceInAlbum = false;
+                }
+
+                if (id == DestinationAssetId)
+                {
+                    DestinationInAlbum = false;
+                }
+            }
+
+            return Json(ids.Select(id => new { id, success = true }).ToArray());
         }
 
         if (request.Method == HttpMethod.Delete && path == "/api/assets")
         {
             Assert.Contains("\"force\":false", body, StringComparison.OrdinalIgnoreCase);
+            if (TrashFailuresRemaining > 0)
+            {
+                TrashFailuresRemaining--;
+                return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+            }
+
             SourceTrashed = true;
+            SourceInAlbum = false;
             return new HttpResponseMessage(HttpStatusCode.NoContent);
         }
 
@@ -120,7 +147,12 @@ internal sealed class FakeImmichServer : HttpMessageHandler
 
     private HttpResponseMessage SearchAssets(string body)
     {
-        var assets = new List<object> { Asset(SourceAssetId, SourceUserId, "source-device") };
+        var assets = new List<object>();
+        if (SourceInAlbum && !SourceTrashed)
+        {
+            assets.Add(Asset(SourceAssetId, SourceUserId, "source-device"));
+        }
+
         if (DestinationInAlbum)
         {
             assets.Add(Asset(DestinationAssetId, AppUserId, DeviceAssetId));
@@ -151,7 +183,7 @@ internal sealed class FakeImmichServer : HttpMessageHandler
         originalMimeType = "image/jpeg",
         fileCreatedAt = "2024-01-02T03:04:05Z",
         fileModifiedAt = "2024-01-02T03:04:06Z",
-        updatedAt = id == SourceAssetId && DestinationInAlbum && ChangeSourceAfterUpload
+        updatedAt = id == SourceAssetId && DestinationCreated && ChangeSourceAfterUpload
             ? "2026-01-01T00:00:01Z"
             : "2026-01-01T00:00:00Z",
         isFavorite = id != DestinationAssetId || !MismatchDestinationMetadata,

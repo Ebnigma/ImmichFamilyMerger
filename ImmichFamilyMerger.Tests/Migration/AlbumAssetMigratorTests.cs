@@ -53,18 +53,25 @@ public sealed class AlbumAssetMigratorTests
     }
 
     [Fact]
-    public async Task TrashesSourceOnlyAfterDestinationBytesMetadataAndAlbumVerify()
+    public async Task RemovesQueueEntryAndTrashesSourceOnlyAfterDestinationVerification()
     {
         using var temporary = new TemporaryDirectory();
         var server = new FakeImmichServer();
 
         await RunMigrationAsync(server, temporary.Path);
 
-        var delete = Assert.Single(server.Requests, request => request.Method == "DELETE");
+        var delete = Assert.Single(
+            server.Requests,
+            request => request.Method == "DELETE" && request.Path == "/api/assets");
         Assert.Contains("\"force\":false", delete.Body, StringComparison.OrdinalIgnoreCase);
-        Assert.True(server.DestinationInAlbum);
+        Assert.False(server.SourceInAlbum);
+        Assert.False(server.DestinationInAlbum);
         Assert.True(server.SourceTrashed);
         Assert.DoesNotContain(server.Requests, request => request.Path == "/api/assets/copy");
+        Assert.DoesNotContain(
+            server.Requests,
+            request => request.Method == "PUT" &&
+                       request.Path == $"/api/albums/{FakeImmichServer.AlbumId}/assets");
         Assert.True(server.Requests.FindIndex(request => request.Method == "DELETE") >
                     server.Requests.FindIndex(request => request.Path.EndsWith("/assets/destination/original")));
 
@@ -83,9 +90,10 @@ public sealed class AlbumAssetMigratorTests
 
         Assert.DoesNotContain(server.Requests, request => request.Method == "DELETE");
         Assert.False(server.SourceTrashed);
+        Assert.True(server.SourceInAlbum);
         var state = await MigrationStateStore.OpenAsync(Path.Combine(temporary.Path, "state.json"), default);
         var record = Assert.Single(state.IncompleteRecords);
-        Assert.Equal(MigrationPhase.AlbumAdded, record.Phase);
+        Assert.Equal(MigrationPhase.MetadataApplied, record.Phase);
         Assert.Contains("does not byte-match", record.LastError);
     }
 
@@ -119,7 +127,8 @@ public sealed class AlbumAssetMigratorTests
 
         await RunMigrationAsync(server, temporary.Path);
 
-        Assert.True(server.DestinationInAlbum);
+        Assert.False(server.SourceInAlbum);
+        Assert.False(server.DestinationInAlbum);
         Assert.True(server.SourceTrashed);
         Assert.Contains(server.Requests, request => request.Path.EndsWith("/assets/destination/original"));
         Assert.Empty((await MigrationStateStore.OpenAsync(
@@ -149,11 +158,17 @@ public sealed class AlbumAssetMigratorTests
         await RunMigrationAsync(server, temporary.Path, trashOriginals: false);
         Assert.Equal(MigrationPhase.Verified, Assert.Single(
             (await MigrationStateStore.OpenAsync(Path.Combine(temporary.Path, "state.json"), default)).IncompleteRecords).Phase);
+        Assert.True(server.SourceInAlbum);
+        Assert.False(server.DestinationInAlbum);
 
         server.SourceTrashed = true;
+        server.SourceInAlbum = false;
         await RunMigrationAsync(server, temporary.Path, trashOriginals: true);
 
-        Assert.DoesNotContain(server.Requests, request => request.Method == "DELETE");
+        Assert.DoesNotContain(
+            server.Requests,
+            request => request.Method == "DELETE" && request.Path == "/api/assets");
+        Assert.False(server.SourceInAlbum);
         Assert.Empty((await MigrationStateStore.OpenAsync(
             Path.Combine(temporary.Path, "state.json"),
             default)).IncompleteRecords);
@@ -168,10 +183,53 @@ public sealed class AlbumAssetMigratorTests
         await RunMigrationAsync(server, temporary.Path);
 
         Assert.DoesNotContain(server.Requests, request => request.Method == "DELETE");
+        Assert.True(server.SourceInAlbum);
         var state = await MigrationStateStore.OpenAsync(Path.Combine(temporary.Path, "state.json"), default);
         var record = Assert.Single(state.IncompleteRecords);
         Assert.Equal(MigrationPhase.Verified, record.Phase);
         Assert.Contains("changed during migration", record.LastError);
+    }
+
+    [Fact]
+    public async Task RemovesFamilyOwnedAssetsLeftInQueueByOlderReleases()
+    {
+        using var temporary = new TemporaryDirectory();
+        var server = new FakeImmichServer
+        {
+            SourceInAlbum = false,
+            DestinationInAlbum = true,
+        };
+
+        await RunMigrationAsync(server, temporary.Path);
+
+        Assert.False(server.DestinationInAlbum);
+        Assert.Contains(
+            server.Requests,
+            request => request.Method == "DELETE" && request.Path.EndsWith("/albums/" + FakeImmichServer.AlbumId + "/assets"));
+        Assert.DoesNotContain(server.Requests, request => request.Method == "POST" && request.Path == "/api/assets");
+        Assert.DoesNotContain(server.Requests, request => request.Path == "/api/assets" && request.Method == "DELETE");
+    }
+
+    [Fact]
+    public async Task TrashFailureKeepsSourceQueuedAndRestartContinues()
+    {
+        using var temporary = new TemporaryDirectory();
+        var server = new FakeImmichServer { TrashFailuresRemaining = 4 };
+
+        await RunMigrationAsync(server, temporary.Path);
+
+        Assert.True(server.SourceInAlbum);
+        Assert.False(server.SourceTrashed);
+        Assert.Equal(MigrationPhase.Verified, Assert.Single(
+            (await MigrationStateStore.OpenAsync(Path.Combine(temporary.Path, "state.json"), default)).IncompleteRecords).Phase);
+
+        await RunMigrationAsync(server, temporary.Path);
+
+        Assert.False(server.SourceInAlbum);
+        Assert.True(server.SourceTrashed);
+        Assert.Empty((await MigrationStateStore.OpenAsync(
+            Path.Combine(temporary.Path, "state.json"),
+            default)).IncompleteRecords);
     }
 
     private static async Task RunMigrationAsync(

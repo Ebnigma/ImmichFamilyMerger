@@ -255,15 +255,19 @@ internal sealed class ImmichApiClient
         }
     }
 
-    public async Task AddToAlbumAsync(string albumId, string assetId, string apiKey, CancellationToken cancellationToken)
+    public async Task RemoveFromAlbumAsync(
+        string albumId,
+        string assetId,
+        string apiKey,
+        CancellationToken cancellationToken)
     {
         using var response = await SendJsonAsync(
-            HttpMethod.Put,
+            HttpMethod.Delete,
             $"albums/{Escape(albumId)}/assets",
             apiKey,
             new IdsRequest { Ids = new[] { assetId } },
             cancellationToken);
-        await EnsureSuccessAsync(response, $"add asset {assetId} to album {albumId}", cancellationToken);
+        await EnsureSuccessAsync(response, $"remove asset {assetId} from album {albumId}", cancellationToken);
     }
 
     public Task TrashAssetAsync(string assetId, string apiKey, CancellationToken cancellationToken) =>

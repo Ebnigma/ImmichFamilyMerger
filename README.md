@@ -5,7 +5,7 @@
 
 Bring family photos and videos together under one Immich account without giving up the convenience of individual user accounts.
 
-Immich Family Merger watches a shared album. When a source user adds a supported asset, the service creates a byte-identical copy owned by the family account, restores supported metadata, verifies the result, and only then moves the source asset to Immich's recoverable trash.
+Immich Family Merger watches a shared album used strictly as a migration queue. When a source user adds a supported asset, the service creates a byte-identical copy owned by the family account, restores supported metadata, verifies the result, moves the source to Immich's recoverable trash, and clears processed entries from the queue.
 
 ## Why use it?
 
@@ -34,7 +34,7 @@ Start every new installation in verification-only mode. Review the copied assets
 1. Sign in as the family account and create the album that will act as the migration queue.
 2. Share the album with each source user and allow them to contribute assets.
 3. Create an API key for the family account with these permissions:
-   `user.read`, `album.read`, `albumAsset.create`, `asset.upload`, `asset.read`, `asset.download`, and `asset.update`.
+   `user.read`, `album.read`, `albumAsset.delete`, `asset.upload`, `asset.read`, `asset.download`, and `asset.update`.
 4. Create an API key for each source account with these permissions:
    `user.read`, `asset.read`, `asset.download`, and `asset.delete`.
 5. Copy the album UUID and each source user's UUID from Immich.
@@ -71,7 +71,7 @@ docker compose up -d
 docker compose logs -f immich-family-merger
 ```
 
-With `TRASH_ORIGINALS=false`, the service downloads, uploads, restores metadata, adds the destination to the album, and performs every verification step while leaving the source untouched.
+With `TRASH_ORIGINALS=false`, the service downloads, uploads, restores metadata, and performs every verification step while leaving the source in the queue and otherwise untouched. The family-owned destination is not added to the queue album.
 
 Inspect the family-owned copies in Immich. When satisfied, set `TRASH_ORIGINALS=true` in `.env` and apply the change:
 
@@ -111,12 +111,14 @@ For each supported asset, the service:
 2. streams the original to the persistent `/data` volume and verifies its SHA-1 checksum and reported size;
 3. uploads it with a deterministic device identity so restarts remain idempotent;
 4. applies supported user-visible and custom metadata;
-5. adds the family-owned copy to the watched album;
-6. downloads the destination original and verifies the bytes, ownership, album membership, and metadata;
-7. re-reads the source and stops if it changed during the migration;
-8. optionally moves the source to Immich's trash using `force: false`.
+5. downloads the destination original and verifies the bytes, ownership, and metadata;
+6. re-reads the source and stops if it changed during the migration;
+7. moves the source to Immich's trash using `force: false` when source trashing is enabled;
+8. verifies that the source and destination are absent from the migration queue, removing any residual album memberships.
 
 Journal updates are flushed to disk and atomically replaced after every completed phase. A restart resumes incomplete work. At the source-trash boundary, destination verification is always repeated instead of trusting an older journal result.
+
+Family-owned assets are never migration inputs. If an older release left destination copies in the queue album, the next scan removes those album memberships without deleting or trashing the assets.
 
 If Immich reports a duplicate during upload, the service adopts it only when ownership, bytes, and metadata match. An ambiguous or mismatched duplicate is left untouched for manual review.
 
@@ -155,10 +157,10 @@ docker compose logs -f immich-family-merger
 
 Useful outcomes include:
 
-- `MOVED`: the destination verified and the source is now in recoverable Immich trash;
-- `VERIFIED`: the destination verified while the source was retained by configuration;
+- `MOVED`: the destination verified, the queue entry was removed, and the source is now in recoverable Immich trash;
+- `VERIFIED`: the destination verified while the source remained in the queue and was retained by configuration;
 - `SKIP`: the asset is unsupported or its owner has no configured API key;
-- `PAUSED` or `FAILED`: the migration stopped safely and the source was not deleted by that attempt.
+- `PAUSED` or `FAILED`: the migration remains journaled for retry and no permanent delete is performed.
 
 If a migration pauses, fix the reported Immich access, configuration, storage, or metadata issue and restart the container. The journal resumes from its last durable phase. Do not edit `state.json` manually unless you have first stopped the service and made a backup of the entire state volume.
 
@@ -175,7 +177,7 @@ docker build -f ImmichFamilyMerger/Dockerfile -t immich-family-merger .
 
 The suite covers paginated album discovery, destination corruption, duplicate handling, unsupported live photos, source changes, trash ordering, and restart recovery.
 
-This project is independent community software and is not affiliated with the Immich project. API behavior follows Immich's documented [search](https://api.immich.app/endpoints/search/searchAssets), [upload](https://api.immich.app/endpoints/assets/uploadAsset), [download](https://api.immich.app/endpoints/assets/downloadAsset), [album](https://api.immich.app/endpoints/albums/addAssetsToAlbum), and [delete](https://api.immich.app/endpoints/assets/deleteAssets) endpoints.
+This project is independent community software and is not affiliated with the Immich project. API behavior follows Immich's documented [search](https://api.immich.app/endpoints/search/searchAssets), [upload](https://api.immich.app/endpoints/assets/uploadAsset), [download](https://api.immich.app/endpoints/assets/downloadAsset), [album removal](https://api.immich.app/endpoints/albums/removeAssetFromAlbum), and [trash/delete](https://api.immich.app/endpoints/assets/deleteAssets) endpoints.
 
 ## License
 
