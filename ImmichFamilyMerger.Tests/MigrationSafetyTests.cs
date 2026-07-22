@@ -16,7 +16,8 @@ public sealed class MigrationSafetyTests
             {
               "id": "33333333-3333-4333-8333-333333333333",
               "albumName": "Family inbox",
-              "assets": []
+              "assetCount": 1,
+              "albumUsers": []
             }
             """;
 
@@ -24,7 +25,20 @@ public sealed class MigrationSafetyTests
 
         Assert.NotNull(album);
         Assert.Equal("Family inbox", album.AlbumName);
-        Assert.Empty(album.Assets);
+        Assert.Equal(1, album.AssetCount);
+    }
+
+    [Fact]
+    public async Task DiscoversAssetsAcrossAllSearchPages()
+    {
+        var server = new PagedAlbumSearchServer();
+        using var client = new HttpClient(server);
+        var api = new ImmichApiClient(client, new Uri("http://immich.test/api/"));
+
+        var assets = await api.GetAlbumAssetsAsync(FakeImmichServer.AlbumId, FakeImmichServer.AppKey, default);
+
+        Assert.Equal(new[] { "asset-1", "asset-2", "asset-3" }, assets.Select(asset => asset.Id));
+        Assert.Equal(2, server.RequestCount);
     }
 
     [Fact]
@@ -39,6 +53,7 @@ public sealed class MigrationSafetyTests
         Assert.Contains("\"force\":false", delete.Body, StringComparison.OrdinalIgnoreCase);
         Assert.True(server.DestinationInAlbum);
         Assert.True(server.SourceTrashed);
+        Assert.DoesNotContain(server.Requests, request => request.Path == "/api/assets/copy");
         Assert.True(server.Requests.FindIndex(request => request.Method == "DELETE") >
                     server.Requests.FindIndex(request => request.Path.EndsWith("/assets/destination/original")));
 
@@ -64,13 +79,13 @@ public sealed class MigrationSafetyTests
     }
 
     [Fact]
-    public async Task UnrelatedDuplicateIsNotAdoptedAndSourceIsUntouched()
+    public async Task DuplicateWithDifferentMetadataIsNotAdoptedAndSourceIsUntouched()
     {
         using var temporary = new TemporaryDirectory();
         var server = new FakeImmichServer
         {
             UploadStatus = "duplicate",
-            DestinationDeviceAssetId = "some-other-client-id",
+            MismatchDestinationMetadata = true,
         };
 
         await RunMigrationAsync(server, temporary.Path);
@@ -82,6 +97,26 @@ public sealed class MigrationSafetyTests
     }
 
     [Fact]
+    public async Task MatchingDuplicateIsAdoptedOnlyAfterFullVerification()
+    {
+        using var temporary = new TemporaryDirectory();
+        var server = new FakeImmichServer
+        {
+            UploadStatus = "duplicate",
+            NormalizeDestinationTimeZone = true,
+        };
+
+        await RunMigrationAsync(server, temporary.Path);
+
+        Assert.True(server.DestinationInAlbum);
+        Assert.True(server.SourceTrashed);
+        Assert.Contains(server.Requests, request => request.Path.EndsWith("/assets/destination/original"));
+        Assert.Empty((await MigrationStateStore.OpenAsync(
+            Path.Combine(temporary.Path, "state.json"),
+            default)).IncompleteRecords);
+    }
+
+    [Fact]
     public async Task LivePhotoIsSkippedWithoutUploadingOrDeleting()
     {
         using var temporary = new TemporaryDirectory();
@@ -89,7 +124,8 @@ public sealed class MigrationSafetyTests
 
         await RunMigrationAsync(server, temporary.Path);
 
-        Assert.DoesNotContain(server.Requests, request => request.Method is "POST" or "DELETE");
+        Assert.DoesNotContain(server.Requests, request => request.Method == "POST" && request.Path == "/api/assets");
+        Assert.DoesNotContain(server.Requests, request => request.Method == "DELETE");
         var state = await MigrationStateStore.OpenAsync(Path.Combine(temporary.Path, "state.json"), default);
         Assert.Empty(state.IncompleteRecords);
     }
@@ -161,8 +197,9 @@ public sealed class MigrationSafetyTests
         public bool CorruptDestinationDownload { get; init; }
         public bool IsLivePhoto { get; init; }
         public bool ChangeSourceAfterUpload { get; init; }
+        public bool MismatchDestinationMetadata { get; init; }
+        public bool NormalizeDestinationTimeZone { get; init; }
         public string UploadStatus { get; init; } = "created";
-        public string? DestinationDeviceAssetId { get; init; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -178,13 +215,35 @@ public sealed class MigrationSafetyTests
 
             if (request.Method == HttpMethod.Get && path == $"/api/albums/{AlbumId}")
             {
+                return Json(new
+                {
+                    id = AlbumId,
+                    albumName = "Family inbox",
+                    assetCount = DestinationInAlbum ? 2 : 1,
+                    albumUsers = Array.Empty<object>(),
+                });
+            }
+
+            if (request.Method == HttpMethod.Post && path == "/api/search/metadata")
+            {
                 var assets = new List<object> { Asset(SourceAssetId, SourceUserId, "source-device") };
                 if (DestinationInAlbum)
                 {
-                    assets.Add(Asset(DestinationAssetId, AppUserId, DestinationDeviceAssetId ?? DeviceAssetId));
+                    assets.Add(Asset(DestinationAssetId, AppUserId, DeviceAssetId));
                 }
 
-                return Json(new { id = AlbumId, albumName = "Family inbox", ownerId = AppUserId, assets });
+                using var search = JsonDocument.Parse(body);
+                if (search.RootElement.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String)
+                {
+                    assets = assets.Where(asset =>
+                        JsonSerializer.SerializeToElement(asset).GetProperty("id").GetString() == id.GetString()).ToList();
+                }
+
+                return Json(new
+                {
+                    albums = new { total = 0, count = 0, items = Array.Empty<object>(), nextPage = (string?)null },
+                    assets = new { total = assets.Count, count = assets.Count, items = assets, nextPage = (string?)null },
+                });
             }
 
             if (request.Method == HttpMethod.Get && path == $"/api/assets/{SourceAssetId}")
@@ -194,7 +253,7 @@ public sealed class MigrationSafetyTests
 
             if (request.Method == HttpMethod.Get && path == $"/api/assets/{DestinationAssetId}")
             {
-                return Json(Asset(DestinationAssetId, AppUserId, DestinationDeviceAssetId ?? DeviceAssetId));
+                return Json(Asset(DestinationAssetId, AppUserId, DeviceAssetId));
             }
 
             if (request.Method == HttpMethod.Get && path.EndsWith("/metadata", StringComparison.Ordinal))
@@ -234,8 +293,8 @@ public sealed class MigrationSafetyTests
             }
 
             if (request.Method == HttpMethod.Put &&
-                (path == "/api/assets/copy" || path == $"/api/assets/{DestinationAssetId}" ||
-                 path == $"/api/assets/{DestinationAssetId}/metadata" || path == "/api/assets"))
+                (path == $"/api/assets/{DestinationAssetId}" || path == $"/api/assets/{DestinationAssetId}/metadata" ||
+                 path == "/api/assets"))
             {
                 return new HttpResponseMessage(HttpStatusCode.NoContent);
             }
@@ -259,7 +318,7 @@ public sealed class MigrationSafetyTests
             updatedAt = id == SourceAssetId && DestinationInAlbum && ChangeSourceAfterUpload
                 ? "2026-01-01T00:00:01Z"
                 : "2026-01-01T00:00:00Z",
-            isFavorite = true,
+            isFavorite = id != DestinationAssetId || !MismatchDestinationMetadata,
             isEdited = false,
             isTrashed = trashed,
             visibility = "timeline",
@@ -268,7 +327,7 @@ public sealed class MigrationSafetyTests
             {
                 fileSizeInByte = Original.LongLength,
                 dateTimeOriginal = "2024-01-02T03:04:05Z",
-                timeZone = (string?)null,
+                timeZone = id == DestinationAssetId && NormalizeDestinationTimeZone ? "Europe/Vienna" : "UTC+1",
                 latitude = 48.1,
                 longitude = 11.5,
                 description = "Family photo",
@@ -289,6 +348,47 @@ public sealed class MigrationSafetyTests
         {
             Content = new ByteArrayContent(value),
         };
+    }
+
+    private sealed class PagedAlbumSearchServer : HttpMessageHandler
+    {
+        public int RequestCount { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Assert.Equal(HttpMethod.Post, request.Method);
+            Assert.Equal("/api/search/metadata", request.RequestUri!.AbsolutePath);
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+            var page = body.RootElement.GetProperty("page").GetInt32();
+            RequestCount++;
+
+            var items = page switch
+            {
+                1 => new[]
+                {
+                    new { id = "asset-1", ownerId = "owner" },
+                    new { id = "asset-2", ownerId = "owner" },
+                },
+                2 => new[] { new { id = "asset-3", ownerId = "owner" } },
+                _ => throw new InvalidOperationException($"Unexpected page {page}."),
+            };
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(new
+                {
+                    assets = new
+                    {
+                        total = 3,
+                        count = items.Length,
+                        items,
+                        nextPage = page == 1 ? "2" : null,
+                    },
+                }), Encoding.UTF8, "application/json"),
+            };
+        }
     }
 
     private sealed record RequestLog(string Method, string Path, string Body);

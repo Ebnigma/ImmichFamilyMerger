@@ -1,7 +1,9 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace ImmichFamilyMerger;
 
@@ -24,7 +26,8 @@ internal sealed class AlbumAssetMigrator
         await ValidateSourceKeysAsync(destinationUser.Id, cancellationToken);
 
         var album = await _api.GetAlbumAsync(_config.AlbumId, _config.AppApiKey, cancellationToken);
-        Console.WriteLine($"Scanning album '{album.AlbumName}' ({album.Assets.Count} assets).");
+        var albumAssets = await _api.GetAlbumAssetsAsync(_config.AlbumId, _config.AppApiKey, cancellationToken);
+        Console.WriteLine($"Scanning album '{album.AlbumName}' ({albumAssets.Count} assets).");
 
         foreach (var record in _state.IncompleteRecords)
         {
@@ -32,7 +35,7 @@ internal sealed class AlbumAssetMigrator
         }
 
         var skipped = 0;
-        foreach (var albumAsset in album.Assets)
+        foreach (var albumAsset in albumAssets)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (albumAsset.OwnerId.Equals(destinationUser.Id, StringComparison.OrdinalIgnoreCase) || _state.Contains(albumAsset.Id))
@@ -155,12 +158,20 @@ internal sealed class AlbumAssetMigrator
                 cancellationToken);
             var destination = await _api.GetAssetAsync(upload.Id, _config.AppApiKey, cancellationToken);
             RequireDestinationIdentity(record, destination, destinationUserId);
-            if (upload.Status.Equals("duplicate", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(destination.DeviceAssetId, record.DeviceAssetId, StringComparison.Ordinal))
+            if (upload.Status.Equals("duplicate", StringComparison.OrdinalIgnoreCase))
             {
-                throw new InvalidOperationException(
-                    $"Immich matched the upload to pre-existing asset {destination.Id} with a different device identity. " +
-                    "It will not be adopted automatically because doing so could overwrite unrelated metadata.");
+                try
+                {
+                    RequireMatchingUserMetadata(record.Source, destination);
+                    await RequireMatchingCustomMetadataAsync(record, destination.Id, cancellationToken);
+                }
+                catch (InvalidDataException exception)
+                {
+                    throw new InvalidOperationException(
+                        $"Immich matched the upload to pre-existing asset {destination.Id}, but its metadata differs. " +
+                        "It will not be adopted or modified automatically.",
+                        exception);
+                }
             }
 
             record.DestinationAssetId = destination.Id;
@@ -170,14 +181,6 @@ internal sealed class AlbumAssetMigrator
 
         var destinationId = record.DestinationAssetId
                             ?? throw new InvalidDataException("The migration journal has no destination asset ID.");
-
-        if (record.Phase < MigrationPhase.RelatedDataCopied)
-        {
-            // This preserves an XMP sidecar, if present. Album, shared-link and stack copying are deliberately disabled.
-            await _api.CopyRelatedDataAsync(record.SourceAssetId, destinationId, _config.AppApiKey, cancellationToken);
-            record.Phase = MigrationPhase.RelatedDataCopied;
-            await _state.SaveAsync(record, cancellationToken);
-        }
 
         if (record.Phase < MigrationPhase.MetadataApplied)
         {
@@ -259,6 +262,15 @@ internal sealed class AlbumAssetMigrator
         RequireMatchingJournalDigest(record, digest, "destination re-download");
         File.Delete(verificationPath);
 
+        await RequireMatchingCustomMetadataAsync(record, destinationId, cancellationToken);
+        await RequireAlbumMembershipAsync(destinationId, cancellationToken);
+    }
+
+    private async Task RequireMatchingCustomMetadataAsync(
+        MigrationRecord record,
+        string destinationId,
+        CancellationToken cancellationToken)
+    {
         var destinationMetadata = await _api.GetMetadataAsync(destinationId, _config.AppApiKey, cancellationToken);
         foreach (var sourceItem in record.Metadata)
         {
@@ -267,17 +279,18 @@ internal sealed class AlbumAssetMigrator
                     JsonNode.Parse(sourceItem.Value.GetRawText()),
                     JsonNode.Parse(targetItem.Value.GetRawText())))
             {
-                throw new InvalidOperationException($"Destination custom metadata key '{sourceItem.Key}' did not verify.");
+                throw new InvalidDataException($"Destination custom metadata key '{sourceItem.Key}' did not verify.");
             }
         }
-
-        await RequireAlbumMembershipAsync(destinationId, cancellationToken);
     }
 
     private async Task RequireAlbumMembershipAsync(string destinationId, CancellationToken cancellationToken)
     {
-        var album = await _api.GetAlbumAsync(_config.AlbumId, _config.AppApiKey, cancellationToken);
-        if (!album.Assets.Any(asset => asset.Id.Equals(destinationId, StringComparison.OrdinalIgnoreCase)))
+        if (!await _api.IsAssetInAlbumAsync(
+                _config.AlbumId,
+                destinationId,
+                _config.AppApiKey,
+                cancellationToken))
         {
             throw new InvalidOperationException($"Destination asset {destinationId} is not present in the family album.");
         }
@@ -403,7 +416,7 @@ internal sealed class AlbumAssetMigrator
             !EqualOptionalNumber(expected.Latitude, actual.Latitude) ||
             !EqualOptionalNumber(expected.Longitude, actual.Longitude) ||
             !EqualOptionalDate(expected.DateTimeOriginal, actual.DateTimeOriginal) ||
-            !EqualOptionalText(expected.TimeZone, actual.TimeZone))
+            !EqualOptionalTimeZone(expected.TimeZone, actual.TimeZone, expected.DateTimeOriginal))
         {
             throw new InvalidDataException("Destination user-visible EXIF metadata does not match the source.");
         }
@@ -425,6 +438,70 @@ internal sealed class AlbumAssetMigrator
         return DateTimeOffset.TryParse(expected, out var expectedDate) && DateTimeOffset.TryParse(actual, out var actualDate)
             ? expectedDate.EqualsExact(actualDate)
             : string.Equals(expected, actual, StringComparison.Ordinal);
+    }
+
+    private static bool EqualOptionalTimeZone(string? expected, string? actual, string? dateTimeOriginal)
+    {
+        if (expected is null || string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (actual is null || !DateTimeOffset.TryParse(
+                dateTimeOriginal,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind,
+                out var capturedAt))
+        {
+            return false;
+        }
+
+        return TryGetUtcOffset(expected, capturedAt, out var expectedOffset) &&
+               TryGetUtcOffset(actual, capturedAt, out var actualOffset) &&
+               expectedOffset == actualOffset;
+    }
+
+    private static bool TryGetUtcOffset(string timeZone, DateTimeOffset capturedAt, out TimeSpan offset)
+    {
+        var fixedOffset = Regex.Match(
+            timeZone,
+            "^(?:UTC|GMT)(?<sign>[+-])(?<hours>\\d{1,2})(?::?(?<minutes>\\d{2}))?$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (fixedOffset.Success &&
+            int.TryParse(fixedOffset.Groups["hours"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var hours) &&
+            hours <= 14)
+        {
+            var minutesText = fixedOffset.Groups["minutes"].Value;
+            var minutes = minutesText.Length == 0
+                ? 0
+                : int.Parse(minutesText, NumberStyles.None, CultureInfo.InvariantCulture);
+            if (minutes < 60)
+            {
+                offset = new TimeSpan(hours, minutes, 0);
+                if (fixedOffset.Groups["sign"].Value == "-")
+                {
+                    offset = -offset;
+                }
+
+                return true;
+            }
+        }
+
+        try
+        {
+            offset = TimeZoneInfo.FindSystemTimeZoneById(timeZone).GetUtcOffset(capturedAt.UtcDateTime);
+            return true;
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            offset = default;
+            return false;
+        }
+        catch (InvalidTimeZoneException)
+        {
+            offset = default;
+            return false;
+        }
     }
 
     private static bool ChecksumsEqual(string left, string right)

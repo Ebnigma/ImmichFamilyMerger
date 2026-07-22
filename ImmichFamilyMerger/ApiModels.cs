@@ -8,6 +8,24 @@ internal sealed class UserInfo
     public string? Email { get; init; }
 }
 
+internal sealed class AlbumAsset
+{
+    public required string Id { get; init; }
+    public required string OwnerId { get; init; }
+}
+
+internal sealed class AssetSearchResponse
+{
+    public required AssetSearchPage Assets { get; init; }
+}
+
+internal sealed class AssetSearchPage
+{
+    public List<AlbumAsset> Items { get; init; } = [];
+    public int Total { get; init; }
+    public string? NextPage { get; init; }
+}
+
 internal sealed class UploadResponse
 {
     public required string Id { get; init; }

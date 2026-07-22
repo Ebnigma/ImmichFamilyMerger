@@ -38,6 +38,69 @@ internal sealed class ImmichApiClient
     public Task<Album> GetAlbumAsync(string albumId, string apiKey, CancellationToken cancellationToken) =>
         GetJsonAsync<Album>(HttpMethod.Get, $"albums/{Escape(albumId)}", apiKey, cancellationToken);
 
+    public async Task<IReadOnlyList<AlbumAsset>> GetAlbumAssetsAsync(
+        string albumId,
+        string apiKey,
+        CancellationToken cancellationToken)
+    {
+        const int pageSize = 100;
+        var assets = new List<AlbumAsset>();
+        var assetIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int? expectedTotal = null;
+        var page = 1;
+
+        while (true)
+        {
+            var response = await SearchAssetsAsync(albumId, null, page, pageSize, apiKey, cancellationToken);
+            expectedTotal ??= response.Assets.Total;
+            if (response.Assets.Total != expectedTotal)
+            {
+                throw new InvalidOperationException(
+                    "The album changed while its assets were being paginated; the scan will retry next cycle.");
+            }
+
+            foreach (var asset in response.Assets.Items)
+            {
+                if (!assetIds.Add(asset.Id))
+                {
+                    throw new InvalidDataException($"Immich returned album asset {asset.Id} more than once.");
+                }
+
+                assets.Add(asset);
+            }
+
+            if (response.Assets.NextPage is null)
+            {
+                if (assets.Count != expectedTotal)
+                {
+                    throw new InvalidDataException(
+                        $"Immich reported {expectedTotal} album assets, but pagination returned {assets.Count}.");
+                }
+
+                return assets;
+            }
+
+            if (!int.TryParse(response.Assets.NextPage, NumberStyles.None, CultureInfo.InvariantCulture, out var nextPage) ||
+                nextPage <= page)
+            {
+                throw new InvalidDataException(
+                    $"Immich returned invalid asset-search page token '{response.Assets.NextPage}'.");
+            }
+
+            page = nextPage;
+        }
+    }
+
+    public async Task<bool> IsAssetInAlbumAsync(
+        string albumId,
+        string assetId,
+        string apiKey,
+        CancellationToken cancellationToken)
+    {
+        var response = await SearchAssetsAsync(albumId, assetId, 1, 1, apiKey, cancellationToken);
+        return response.Assets.Items.Any(asset => asset.Id.Equals(assetId, StringComparison.OrdinalIgnoreCase));
+    }
+
     public Task<Asset> GetAssetAsync(string assetId, string apiKey, CancellationToken cancellationToken) =>
         GetJsonAsync<Asset>(HttpMethod.Get, $"assets/{Escape(assetId)}", apiKey, cancellationToken);
 
@@ -160,18 +223,6 @@ internal sealed class ImmichApiClient
         }, cancellationToken);
     }
 
-    public Task CopyRelatedDataAsync(string sourceId, string targetId, string apiKey, CancellationToken cancellationToken) =>
-        SendJsonNoContentAsync(HttpMethod.Put, "assets/copy", apiKey, new
-        {
-            sourceId,
-            targetId,
-            albums = false,
-            favorite = true,
-            sharedLinks = false,
-            sidecar = true,
-            stack = false,
-        }, cancellationToken);
-
     public async Task UpdateAssetMetadataAsync(
         string targetId,
         Asset source,
@@ -237,6 +288,35 @@ internal sealed class ImmichApiClient
         using var response = await SendAsync(method, path, apiKey, cancellationToken);
         await EnsureSuccessAsync(response, $"{method} {path}", cancellationToken);
         return await ReadJsonAsync<T>(response, cancellationToken);
+    }
+
+    private async Task<AssetSearchResponse> SearchAssetsAsync(
+        string albumId,
+        string? assetId,
+        int page,
+        int size,
+        string apiKey,
+        CancellationToken cancellationToken)
+    {
+        var request = new Dictionary<string, object>
+        {
+            ["albumIds"] = new[] { albumId },
+            ["page"] = page,
+            ["size"] = size,
+        };
+        if (assetId is not null)
+        {
+            request["id"] = assetId;
+        }
+
+        using var response = await SendJsonAsync(
+            HttpMethod.Post,
+            "search/metadata",
+            apiKey,
+            request,
+            cancellationToken);
+        await EnsureSuccessAsync(response, $"search assets in album {albumId}", cancellationToken);
+        return await ReadJsonAsync<AssetSearchResponse>(response, cancellationToken);
     }
 
     private async Task SendJsonNoContentAsync(
