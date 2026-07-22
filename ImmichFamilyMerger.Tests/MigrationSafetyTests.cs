@@ -10,6 +10,24 @@ namespace ImmichFamilyMerger.Tests;
 public sealed class MigrationSafetyTests
 {
     [Fact]
+    public void CurrentAlbumResponseCanBeDeserialized()
+    {
+        const string response = """
+            {
+              "id": "33333333-3333-4333-8333-333333333333",
+              "albumName": "Family inbox",
+              "assets": []
+            }
+            """;
+
+        var album = JsonSerializer.Deserialize<Album>(response, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.NotNull(album);
+        Assert.Equal("Family inbox", album.AlbumName);
+        Assert.Empty(album.Assets);
+    }
+
+    [Fact]
     public async Task TrashesSourceOnlyAfterDestinationBytesMetadataAndAlbumVerify()
     {
         using var temporary = new TemporaryDirectory();
