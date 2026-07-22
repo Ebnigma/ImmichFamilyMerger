@@ -40,7 +40,7 @@ jobs:
         run: dotnet test ImmichFamilyMerger.sln --no-restore --configuration Release
 
   publish:
-    if: github.event_name != 'pull_request'
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: test
     runs-on: ubuntu-latest
     permissions:
@@ -72,11 +72,10 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           flavor: latest=false
           tags: |
-            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/master' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' || (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')) }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
             type=sha,prefix=sha-
           labels: |
             org.opencontainers.image.title=Immich Family Merger

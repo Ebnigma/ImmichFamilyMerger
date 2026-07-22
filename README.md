@@ -129,9 +129,11 @@ No client using several HTTP requests can provide a database transaction across 
 
 Container images are published for `linux/amd64` and `linux/arm64`.
 
-- `latest` follows the newest successful build on the default branch.
+- `latest` follows the newest stable tagged release.
 - A release such as `v1.2.3` publishes `1.2.3`, `1.2`, and `1` image tags.
-- `sha-<commit>` identifies one exact build.
+- `sha-<commit>` identifies the exact commit used for a tagged build.
+
+Pull requests and pushes to `master` run the safety tests, but container images are published only when a `v*` tag is pushed.
 
 For predictable deployments, pin a full release version in `.env`:
 
