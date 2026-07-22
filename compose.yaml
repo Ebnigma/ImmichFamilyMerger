@@ -1,0 +1,19 @@
+services:
+  immich-family-merger:
+    image: ${IMMICH_FAMILY_MERGER_IMAGE:-ghcr.io/ebnigma/immichfamilymerger:latest}
+    pull_policy: always
+    restart: unless-stopped
+    environment:
+      BASE_URL: ${BASE_URL:?Set BASE_URL in .env}
+      ALBUM_ID: ${ALBUM_ID:?Set ALBUM_ID in .env}
+      APP_API_KEY: ${APP_API_KEY:?Set APP_API_KEY in .env}
+      USER_API_KEYS: ${USER_API_KEYS:?Set USER_API_KEYS in .env}
+      SLEEP_TIME: ${SLEEP_TIME:-300}
+      METADATA_SETTLE_TIME: ${METADATA_SETTLE_TIME:-15}
+      TRASH_ORIGINALS: ${TRASH_ORIGINALS:-true}
+      STATE_PATH: /data/state.json
+    volumes:
+      - merger-state:/data
+
+volumes:
+  merger-state:

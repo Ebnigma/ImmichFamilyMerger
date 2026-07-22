@@ -1,112 +1,172 @@
-﻿using System;
-using System.Globalization;
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Net.Http.Json;
-using System.Text.Json;
-using System.Threading.Tasks;
-
 using ImmichFamilyMerger;
-class Program
+using System.Runtime.InteropServices;
+
+try
 {
-    static async Task Main(string[] args)
+    var config = ParseArguments(args);
+    using var httpClient = new HttpClient
     {
-        try
-        {
-            var config = ParseArguments(args);
-            using var httpClient = new HttpClient();
+        Timeout = Timeout.InfiniteTimeSpan,
+    };
 
-            while (true)
-            {
-                var migrator = new AlbumAssetMigrator(httpClient, config);
-                bool success = await migrator.MigrateAlbumAssetsAsync();
-                if (!success)
-                    break;
+    Directory.CreateDirectory(Path.GetDirectoryName(config.StatePath)!);
+    using var instanceLock = AcquireInstanceLock(config.StatePath);
+    var api = new ImmichApiClient(httpClient, config.ApiBaseUri);
+    var state = await MigrationStateStore.OpenAsync(config.StatePath, CancellationToken.None);
+    var migrator = new AlbumAssetMigrator(api, state, config);
 
-                if (config.SleepAfterSeconds > 0)
-                {
-                    Console.WriteLine($"Sleeping for {config.SleepAfterSeconds} seconds...");
-                    await Task.Delay(config.SleepAfterSeconds * 1000);
-                }
-                else
-                {
-                    break;
-                }
-            }
-        }
-        catch (Exception ex)
+    using var shutdown = new CancellationTokenSource();
+    using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, context =>
+    {
+        context.Cancel = true;
+        shutdown.Cancel();
+    });
+    Console.CancelKeyPress += (_, eventArgs) =>
+    {
+        eventArgs.Cancel = true;
+        shutdown.Cancel();
+    };
+
+    do
+    {
+        await migrator.MigrateAlbumAssetsAsync(shutdown.Token);
+        if (config.SleepAfterSeconds <= 0)
         {
-            Console.WriteLine($"Fatal error: {ex.Message}");
+            break;
         }
+
+        Console.WriteLine($"Cycle complete. Sleeping for {config.SleepAfterSeconds} seconds.");
+        await Task.Delay(TimeSpan.FromSeconds(config.SleepAfterSeconds), shutdown.Token);
+    }
+    while (!shutdown.IsCancellationRequested);
+}
+catch (OperationCanceledException)
+{
+    Console.WriteLine("Shutdown requested.");
+}
+catch (Exception exception)
+{
+    Console.Error.WriteLine($"Fatal error: {exception.Message}");
+    Environment.ExitCode = 1;
+}
+
+static AppConfig ParseArguments(string[] args)
+{
+    var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var argument in args.Where(value => value.StartsWith("--", StringComparison.Ordinal) && value.Contains('=')))
+    {
+        var parts = argument[2..].Split('=', 2);
+        values[parts[0]] = parts[1];
     }
 
-    private static AppConfig ParseArguments(string[] args)
+    AddEnvironmentFallback(values, "userApiKeys", "USER_API_KEYS");
+    AddEnvironmentFallback(values, "appApiKey", "APP_API_KEY");
+    AddEnvironmentFallback(values, "baseUrl", "BASE_URL");
+    AddEnvironmentFallback(values, "albumId", "ALBUM_ID");
+    AddEnvironmentFallback(values, "sleepTime", "SLEEP_TIME");
+    AddEnvironmentFallback(values, "statePath", "STATE_PATH");
+    AddEnvironmentFallback(values, "trashOriginals", "TRASH_ORIGINALS");
+    AddEnvironmentFallback(values, "metadataSettleTime", "METADATA_SETTLE_TIME");
+
+    var required = new[] { "userApiKeys", "appApiKey", "baseUrl", "albumId" };
+    var missing = required.Where(key => !values.TryGetValue(key, out var value) || string.IsNullOrWhiteSpace(value)).ToArray();
+    if (missing.Length > 0)
     {
-        var argDict = args
-            .Where(a => a.StartsWith("--") && a.Contains('='))
-            .Select(a => a.Substring(2).Split('=', 2))
-            .Where(parts => parts.Length == 2)
-            .ToDictionary(parts => parts[0], parts => parts[1]);
+        throw new ArgumentException(
+            $"Missing required settings: {string.Join(", ", missing)}. " +
+            "Set USER_API_KEYS, APP_API_KEY, BASE_URL and ALBUM_ID, or pass the corresponding --name=value arguments.");
+    }
 
-        string[] requiredArgs = ["userApiKeys", "appApiKey", "baseUrl", "albumId"];
-        var missing = requiredArgs.Where(r => !argDict.ContainsKey(r) || string.IsNullOrWhiteSpace(argDict[r])).ToList();
-        if (missing.Count > 0)
+    var userApiKeys = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var pair in values["userApiKeys"].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+    {
+        var separator = pair.IndexOf(':');
+        if (separator <= 0 || separator == pair.Length - 1)
         {
-            throw new ArgumentException("Missing required arguments: " + string.Join(", ", missing) +
-                "\nUsage: ImmichFamilyMerger --userApiKeys=user1:apikey1,user2:apikey2 --appApiKey=appkey --baseUrl=https://example.com --albumId=albumid [--sleepTime=10]");
+            throw new ArgumentException("USER_API_KEYS must use the form user-id:api-key,user-id:api-key.");
         }
 
-        int sleepAfterSeconds = 0;
-        if (argDict.TryGetValue("sleepTime", out var sleepStr) && int.TryParse(sleepStr, out var sleepVal) && sleepVal > 0)
-        {
-            sleepAfterSeconds = sleepVal;
-        }
+        userApiKeys.Add(pair[..separator].Trim(), pair[(separator + 1)..].Trim());
+    }
 
-        string userApiKeysArg = argDict["userApiKeys"];
-        var userApiKey = new Dictionary<string, string>();
-        foreach (var pair in userApiKeysArg.Split(',', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var parts = pair.Split(':', 2);
-            if (parts.Length != 2 || string.IsNullOrWhiteSpace(parts[0]) || string.IsNullOrWhiteSpace(parts[1]))
-            {
-                throw new ArgumentException($"Invalid user API key format: {pair}");
-            }
-            userApiKey[parts[0]] = parts[1];
-        }
+    if (!Uri.TryCreate(values["baseUrl"].TrimEnd('/') + "/", UriKind.Absolute, out var serverUri) ||
+        (serverUri.Scheme != Uri.UriSchemeHttp && serverUri.Scheme != Uri.UriSchemeHttps))
+    {
+        throw new ArgumentException("BASE_URL must be an absolute HTTP or HTTPS URL.");
+    }
 
-        string appApiKey = argDict["appApiKey"];
-        string baseUrl = argDict["baseUrl"].TrimEnd('/');
-        string albumId = argDict["albumId"];
+    var apiBase = serverUri.AbsolutePath.TrimEnd('/').EndsWith("/api", StringComparison.OrdinalIgnoreCase)
+        ? serverUri
+        : new Uri(serverUri, "api/");
 
-        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out _))
-        {
-            throw new ArgumentException("Invalid baseUrl. Must be a valid absolute URL.");
-        }
-        if (string.IsNullOrWhiteSpace(albumId))
-        {
-            throw new ArgumentException("albumId cannot be empty.");
-        }
+    var sleepSeconds = ParseNonNegativeInt(values, "sleepTime", 0);
+    var settleSeconds = ParseNonNegativeInt(values, "metadataSettleTime", 15);
+    var statePath = values.GetValueOrDefault("statePath", "/data/state.json");
+    if (!Path.IsPathFullyQualified(statePath))
+    {
+        throw new ArgumentException("STATE_PATH must be an absolute path inside the container.");
+    }
 
-        // Write config to console for debugging
-        Console.WriteLine("Parsed configuration:");
-        Console.WriteLine($"  BaseUrl: {baseUrl}");
-        Console.WriteLine($"  AlbumId: {albumId}");
-        Console.WriteLine($"  AppApiKey: {appApiKey}");
-        Console.WriteLine($"  SleepAfterSeconds: {sleepAfterSeconds}");
-        Console.WriteLine("  UserApiKeys:");
-        foreach (var kvp in userApiKey)
-        {
-            Console.WriteLine($"    {kvp.Key}: {new string('*', Math.Max(4, kvp.Value.Length))}");
-        }
+    var trashOriginals = true;
+    if (values.TryGetValue("trashOriginals", out var trashValue) && !bool.TryParse(trashValue, out trashOriginals))
+    {
+        throw new ArgumentException("trashOriginals must be true or false.");
+    }
 
-        return new AppConfig
-        {
-            UserApiKeys = userApiKey,
-            AppApiKey = appApiKey,
-            BaseUrl = baseUrl,
-            AlbumId = albumId,
-            SleepAfterSeconds = sleepAfterSeconds
-        };
+    Console.WriteLine("Configuration loaded:");
+    Console.WriteLine($"  API: {apiBase}");
+    Console.WriteLine($"  Album: {values["albumId"]}");
+    Console.WriteLine($"  Source accounts: {userApiKeys.Count}");
+    Console.WriteLine($"  State: {statePath}");
+    Console.WriteLine($"  Trash originals after verification: {trashOriginals}");
 
+    return new AppConfig
+    {
+        UserApiKeys = userApiKeys,
+        AppApiKey = values["appApiKey"],
+        ApiBaseUri = apiBase,
+        AlbumId = values["albumId"],
+        StatePath = statePath,
+        SleepAfterSeconds = sleepSeconds,
+        MetadataSettleSeconds = settleSeconds,
+        TrashOriginals = trashOriginals,
+    };
+}
+
+static void AddEnvironmentFallback(IDictionary<string, string> values, string key, string environmentVariable)
+{
+    var value = Environment.GetEnvironmentVariable(environmentVariable);
+    if (!values.ContainsKey(key) && !string.IsNullOrWhiteSpace(value))
+    {
+        values[key] = value;
+    }
+}
+
+static int ParseNonNegativeInt(IReadOnlyDictionary<string, string> values, string key, int defaultValue)
+{
+    if (!values.TryGetValue(key, out var text) || string.IsNullOrWhiteSpace(text))
+    {
+        return defaultValue;
+    }
+
+    if (!int.TryParse(text, out var value) || value < 0)
+    {
+        throw new ArgumentException($"{key} must be a non-negative integer.");
+    }
+
+    return value;
+}
+
+static FileStream AcquireInstanceLock(string statePath)
+{
+    try
+    {
+        return new FileStream(statePath + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+    }
+    catch (IOException exception)
+    {
+        throw new InvalidOperationException(
+            "Another Immich Family Merger process is already using this state path. Run exactly one replica per journal.",
+            exception);
     }
 }

@@ -1,6 +1,6 @@
 **/.classpath
 **/.dockerignore
-**/.env
+**/.env*
 **/.git
 **/.gitignore
 **/.project
@@ -19,8 +19,16 @@
 **/node_modules
 **/npm-debug.log
 **/obj
+**/state.json
+**/state.json.*
+**/media/*.original
+**/media/*.original.part
+**/media/*.verification
+**/media/*.verification.part
 **/secrets.dev.yaml
 **/values.dev.yaml
+**/TestResults
+ImmichFamilyMerger.Tests
 LICENSE
 README.md
 !**/.gitignore

@@ -3,6 +3,20 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/master/VisualStudio.gitignore
 
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Runtime migration state and temporary family media
+**/state.json
+**/state.json.tmp
+**/state.json.lock
+**/media/*.original
+**/media/*.original.part
+**/media/*.verification
+**/media/*.verification.part
+
 # User-specific files
 *.rsuser
 *.suo

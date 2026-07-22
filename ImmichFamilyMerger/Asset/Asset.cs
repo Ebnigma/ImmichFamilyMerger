@@ -1,39 +1,27 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System.Text.Json;
 
-namespace ImmichFamilyMerger
+namespace ImmichFamilyMerger;
+
+internal sealed class Asset
 {
-    internal class Asset
-    {
-        public string Id { get; set; }
-        public string DeviceAssetId { get; set; }
-        public string OwnerId { get; set; }
-        public string DeviceId { get; set; }
-        public string? LibraryId { get; set; }
-        public string Type { get; set; }
-        public string OriginalPath { get; set; }
-        public string OriginalFileName { get; set; }
-        public string OriginalMimeType { get; set; }
-        public string Thumbhash { get; set; }
-        public DateTime FileCreatedAt { get; set; }
-        public DateTime FileModifiedAt { get; set; }
-        public DateTime LocalDateTime { get; set; }
-        public DateTime UpdatedAt { get; set; }
-        public bool IsFavorite { get; set; }
-        public bool IsArchived { get; set; }
-        public bool IsTrashed { get; set; }
-        public string Visibility { get; set; }
-        public string Duration { get; set; }
-        public ExifInfo? ExifInfo { get; set; }
-        public string? LivePhotoVideoId { get; set; }
-        public List<object> People { get; set; }
-        public string Checksum { get; set; }
-        public bool IsOffline { get; set; }
-        public bool HasMetadata { get; set; }
-        public string? DuplicateId { get; set; }
-        public bool Resized { get; set; }
-    }
+    public required string Id { get; init; }
+    public string? DeviceAssetId { get; init; }
+    public required string OwnerId { get; init; }
+    public string? DeviceId { get; init; }
+    public required string Type { get; init; }
+    public required string OriginalFileName { get; init; }
+    public string? OriginalMimeType { get; init; }
+    public required string FileCreatedAt { get; init; }
+    public required string FileModifiedAt { get; init; }
+    public string? UpdatedAt { get; init; }
+    public bool IsFavorite { get; init; }
+    public bool IsEdited { get; init; }
+    public bool IsTrashed { get; init; }
+    public required string Visibility { get; init; }
+    public JsonElement Duration { get; init; }
+    public ExifInfo? ExifInfo { get; init; }
+    public string? LivePhotoVideoId { get; init; }
+    public JsonElement? Stack { get; init; }
+    public required string Checksum { get; init; }
+    public bool HasMetadata { get; init; }
 }
