@@ -7,15 +7,6 @@ using System.Text.Json;
 
 namespace ImmichFamilyMerger;
 
-internal sealed record FileDigest(string Sha1Base64, long Length);
-
-internal sealed class ImmichApiException : Exception
-{
-    public ImmichApiException(HttpStatusCode statusCode, string message) : base(message) => StatusCode = statusCode;
-
-    public HttpStatusCode StatusCode { get; }
-}
-
 internal sealed class ImmichApiClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)

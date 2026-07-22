@@ -1,49 +1,13 @@
 using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace ImmichFamilyMerger;
-
-internal enum MigrationPhase
-{
-    Discovered,
-    Downloaded,
-    Uploaded,
-    // Retained so journals written by older releases remain readable.
-    RelatedDataCopied,
-    MetadataApplied,
-    AlbumAdded,
-    Verified,
-    SourceTrashed,
-    Complete,
-}
-
-internal sealed class MigrationRecord
-{
-    public required string SourceAssetId { get; init; }
-    public required string SourceOwnerId { get; init; }
-    public required string DeviceAssetId { get; init; }
-    public required Asset Source { get; init; }
-    public List<AssetMetadata> Metadata { get; init; } = [];
-    public MigrationPhase Phase { get; set; }
-    public string? DestinationAssetId { get; set; }
-    public string? VerifiedChecksum { get; set; }
-    public long? VerifiedLength { get; set; }
-    public string? LastError { get; set; }
-    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
-}
-
-internal sealed class MigrationState
-{
-    public int Version { get; init; } = 1;
-    public Dictionary<string, MigrationRecord> Assets { get; init; } = new(StringComparer.OrdinalIgnoreCase);
-}
 
 internal sealed class MigrationStateStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true,
-        Converters = { new JsonStringEnumConverter() },
+        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
     };
 
     private readonly string _path;

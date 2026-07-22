@@ -10,5 +10,5 @@ internal sealed class AppConfig
     public string StatePath { get; init; } = "/data/state.json";
     public int SleepAfterSeconds { get; init; }
     public int MetadataSettleSeconds { get; init; } = 15;
-    public bool TrashOriginals { get; init; } = true;
+    public bool TrashOriginals { get; init; }
 }

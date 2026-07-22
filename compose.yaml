@@ -10,7 +10,7 @@ services:
       USER_API_KEYS: ${USER_API_KEYS:?Set USER_API_KEYS in .env}
       SLEEP_TIME: ${SLEEP_TIME:-300}
       METADATA_SETTLE_TIME: ${METADATA_SETTLE_TIME:-15}
-      TRASH_ORIGINALS: ${TRASH_ORIGINALS:-true}
+      TRASH_ORIGINALS: ${TRASH_ORIGINALS:-false}
       STATE_PATH: /data/state.json
     volumes:
       - merger-state:/data
